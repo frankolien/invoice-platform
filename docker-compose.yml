@@ -6,7 +6,7 @@ services:
       POSTGRES_PASSWORD: invoice
       POSTGRES_DB: invoice_platform
     ports:
-      - "5432:5432"
+      - "5433:5432"
     volumes:
       - pgdata:/var/lib/postgresql/data
     healthcheck:
