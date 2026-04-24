@@ -52,4 +52,32 @@ impl Cache {
             .await
             .map_err(|e| AppError::internal(format!("redis SET EX: {e}")))
     }
+
+    /// INCR a counter and set TTL on first increment only.
+    /// Returns the post-increment value.
+    pub async fn incr_with_ttl(&self, key: &str, ttl_secs: u64) -> AppResult<u64> {
+        let mut conn = self.conn.clone();
+        let (count,): (u64,) = redis::pipe()
+            .atomic()
+            .cmd("INCR")
+            .arg(key)
+            .cmd("EXPIRE")
+            .arg(key)
+            .arg(ttl_secs)
+            .arg("NX") // only set TTL if not already set
+            .ignore()
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AppError::internal(format!("redis INCR+EXPIRE: {e}")))?;
+        Ok(count)
+    }
+
+    pub async fn ttl(&self, key: &str) -> AppResult<i64> {
+        let mut conn = self.conn.clone();
+        redis::cmd("TTL")
+            .arg(key)
+            .query_async(&mut conn)
+            .await
+            .map_err(|e| AppError::internal(format!("redis TTL: {e}")))
+    }
 }

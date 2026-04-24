@@ -40,6 +40,18 @@ async-stripe = { version = "0.40", default-features = false, features = ["runtim
 redis = { version = "0.27", features = ["tokio-rustls-comp", "connection-manager"] }
 hex = "0.4"
 
+apalis = { version = "0.7", features = ["retry", "limit", "tracing"] }
+apalis-redis = "0.7"
+apalis-cron = "0.7"
+tower = "0.5"
+futures = "0.3"
+async-trait = "0.1"
+
+hmac = "0.12"
+sha2 = "0.10"
+reqwest = { version = "0.12", default-features = false, features = ["json", "rustls-tls"] }
+rand = "0.8"
+
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }
 actix-http = "3"

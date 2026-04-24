@@ -7,6 +7,7 @@ use uuid::Uuid;
 use crate::cache::Cache;
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
+use crate::jobs::{JobQueues, dispatch_webhooks};
 use crate::modules::payment::stripe_client::{StripeClient, require_stripe};
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -19,6 +20,7 @@ async fn stripe_webhook(
     body: web::Bytes,
     pool: web::Data<DbPool>,
     cache: web::Data<Cache>,
+    queues: web::Data<JobQueues>,
     stripe: Option<web::Data<StripeClient>>,
 ) -> AppResult<impl Responder> {
     let stripe = require_stripe(stripe.as_ref())?;
@@ -53,12 +55,12 @@ async fn stripe_webhook(
         }
         EventType::PaymentIntentSucceeded => {
             if let EventObject::PaymentIntent(pi) = event.data.object {
-                handle_payment_succeeded(&pool, pi).await?;
+                handle_payment_succeeded(&pool, &queues, pi).await?;
             }
         }
         EventType::PaymentIntentPaymentFailed => {
             if let EventObject::PaymentIntent(pi) = event.data.object {
-                handle_payment_failed(&pool, pi).await?;
+                handle_payment_failed(&pool, &queues, pi).await?;
             }
         }
         other => {
@@ -101,37 +103,62 @@ async fn handle_checkout_completed(
 
 async fn handle_payment_succeeded(
     pool: &DbPool,
+    queues: &JobQueues,
     pi: stripe::PaymentIntent,
 ) -> AppResult<()> {
     let pi_id = pi.id.as_str();
 
-    // Move the payment to succeeded, capture the paid amount/time.
-    let updated: Option<(Uuid, Uuid, Decimal)> = sqlx::query_as(
+    // Move the payment to succeeded, capture the paid amount/time + org.
+    let updated: Option<(Uuid, Uuid, Uuid, Decimal)> = sqlx::query_as(
         r#"
         UPDATE payments
         SET status = 'succeeded',
             paid_at = COALESCE(paid_at, now()),
             updated_at = now()
         WHERE stripe_payment_intent_id = $1
-        RETURNING id, invoice_id, amount
+        RETURNING id, org_id, invoice_id, amount
         "#,
     )
     .bind(pi_id)
     .fetch_optional(pool)
     .await?;
 
-    let Some((_payment_id, invoice_id, amount)) = updated else {
+    let Some((payment_id, org_id, invoice_id, amount)) = updated else {
         tracing::warn!(payment_intent_id = %pi_id, "payment_intent.succeeded for unknown payment");
         return Ok(());
     };
 
+    dispatch_webhooks(
+        queues,
+        pool,
+        org_id,
+        "payment.succeeded",
+        serde_json::json!({
+            "payment_id": payment_id,
+            "invoice_id": invoice_id,
+            "amount": amount,
+        }),
+    )
+    .await;
+
     // Recompute invoice status from the sum of succeeded payments.
-    transition_invoice_for_payment(pool, invoice_id, amount).await?;
+    if transition_invoice_for_payment(pool, invoice_id, amount).await? {
+        // Invoice transitioned to 'paid' — emit invoice.paid
+        dispatch_webhooks(
+            queues,
+            pool,
+            org_id,
+            "invoice.paid",
+            serde_json::json!({ "invoice_id": invoice_id }),
+        )
+        .await;
+    }
     Ok(())
 }
 
 async fn handle_payment_failed(
     pool: &DbPool,
+    queues: &JobQueues,
     pi: stripe::PaymentIntent,
 ) -> AppResult<()> {
     let pi_id = pi.id.as_str();
@@ -141,32 +168,50 @@ async fn handle_payment_failed(
         .and_then(|e| e.message.clone())
         .unwrap_or_else(|| "unknown".to_string());
 
-    sqlx::query(
+    let updated: Option<(Uuid, Uuid, Uuid)> = sqlx::query_as(
         r#"
         UPDATE payments
         SET status = 'failed',
             failure_reason = $1,
             updated_at = now()
         WHERE stripe_payment_intent_id = $2
+        RETURNING id, org_id, invoice_id
         "#,
     )
     .bind(&reason)
     .bind(pi_id)
-    .execute(pool)
+    .fetch_optional(pool)
     .await?;
+
+    if let Some((payment_id, org_id, invoice_id)) = updated {
+        dispatch_webhooks(
+            queues,
+            pool,
+            org_id,
+            "payment.failed",
+            serde_json::json!({
+                "payment_id": payment_id,
+                "invoice_id": invoice_id,
+                "reason": reason,
+            }),
+        )
+        .await;
+    }
     Ok(())
 }
 
 /// Sets the invoice to 'paid' if the sum of succeeded payments covers its total,
-/// otherwise 'partially_paid'. Idempotent: safe to call on retries.
+/// otherwise 'partially_paid'. Returns true if this call flipped it to 'paid'
+/// (so the caller can emit invoice.paid exactly once). Idempotent.
 async fn transition_invoice_for_payment(
     pool: &DbPool,
     invoice_id: Uuid,
     _new_payment_amount: Decimal,
-) -> AppResult<()> {
-    let row: (Decimal, Decimal) = sqlx::query_as(
+) -> AppResult<bool> {
+    let row: (String, Decimal, Decimal) = sqlx::query_as(
         r#"
         SELECT
+            (SELECT status FROM invoices WHERE id = $1) AS status,
             (SELECT total FROM invoices WHERE id = $1) AS total,
             COALESCE(
                 (SELECT SUM(amount) FROM payments
@@ -179,13 +224,13 @@ async fn transition_invoice_for_payment(
     .fetch_one(pool)
     .await?;
 
-    let (total, paid) = row;
+    let (prev_status, total, paid) = row;
     let new_status = if paid >= total {
         "paid"
     } else if paid > Decimal::ZERO {
         "partially_paid"
     } else {
-        return Ok(());
+        return Ok(false);
     };
 
     sqlx::query(
@@ -202,5 +247,5 @@ async fn transition_invoice_for_payment(
     .execute(pool)
     .await?;
 
-    Ok(())
+    Ok(prev_status != "paid" && new_status == "paid")
 }

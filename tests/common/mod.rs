@@ -9,6 +9,7 @@ use uuid::Uuid;
 use invoice_platform::auth::jwt::TokenService;
 use invoice_platform::cache::Cache;
 use invoice_platform::config::Config;
+use invoice_platform::jobs;
 use invoice_platform::{AppState, build_app};
 
 pub const TEST_ACCESS_SECRET: &str = "test-access-secret";
@@ -48,7 +49,14 @@ pub async fn make_app(
     let cache = Cache::connect(&cfg.redis_url)
         .await
         .expect("connect redis (is docker compose up?)");
-    let state = AppState::new(pool, token_service(), cache, cfg, None).expect("build state");
+    let queues = jobs::connect(&cfg.redis_url)
+        .await
+        .expect("connect apalis redis");
+    // Note: we intentionally don't spawn workers in tests — enqueues land in
+    // Redis but nothing drains them. The invoice /send endpoint succeeds
+    // whether or not the email job runs.
+    let state =
+        AppState::new(pool, token_service(), cache, cfg, None, queues).expect("build state");
     test::init_service(build_app(state)).await
 }
 

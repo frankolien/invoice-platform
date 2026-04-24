@@ -3,6 +3,7 @@ pub mod cache;
 pub mod config;
 pub mod db;
 pub mod error;
+pub mod jobs;
 pub mod middleware;
 pub mod modules;
 pub mod observability;
@@ -15,6 +16,7 @@ use crate::auth::jwt::TokenService;
 use crate::cache::Cache;
 use crate::config::Config;
 use crate::db::DbPool;
+use crate::jobs::JobQueues;
 use crate::modules::payment::stripe_client::StripeClient;
 use crate::observability::metrics::Metrics;
 
@@ -26,6 +28,7 @@ pub struct AppState {
     pub cache: web::Data<Cache>,
     pub config: web::Data<Config>,
     pub stripe: Option<web::Data<StripeClient>>,
+    pub queues: web::Data<JobQueues>,
 }
 
 impl AppState {
@@ -35,6 +38,7 @@ impl AppState {
         cache: Cache,
         config: Config,
         stripe: Option<StripeClient>,
+        queues: JobQueues,
     ) -> anyhow::Result<Self> {
         Ok(Self {
             pool: web::Data::new(pool),
@@ -43,6 +47,7 @@ impl AppState {
             cache: web::Data::new(cache),
             config: web::Data::new(config),
             stripe: stripe.map(web::Data::new),
+            queues: web::Data::new(queues),
         })
     }
 }
@@ -64,6 +69,7 @@ pub fn build_app(
         .app_data(state.metrics)
         .app_data(state.cache)
         .app_data(state.config)
+        .app_data(state.queues)
         .app_data(web::JsonConfig::default().limit(1024 * 1024))
         .app_data(web::PayloadConfig::default().limit(1024 * 1024));
 
@@ -74,12 +80,23 @@ pub fn build_app(
     app.configure(observability::health::configure)
         .configure(observability::metrics::configure)
         .service(
+            // Only /v1 is rate-limited + audited. Health, metrics, and root
+            // stay unwrapped so probes never get 429'd and never log audit
+            // noise.
             web::scope("/v1")
+                .wrap(actix_web::middleware::from_fn(
+                    middleware::audit_log::audit_log,
+                ))
+                .wrap(actix_web::middleware::from_fn(
+                    middleware::rate_limit::rate_limit,
+                ))
                 .configure(modules::auth::configure)
                 .configure(modules::organization::configure)
                 .configure(modules::client::configure)
                 .configure(modules::invoice::configure)
                 .configure(modules::payment::configure)
-                .configure(modules::payment::webhook::configure),
+                .configure(modules::payment::webhook::configure)
+                .configure(modules::webhook_subscription::configure)
+                .configure(modules::recurring_invoice::configure),
         )
 }

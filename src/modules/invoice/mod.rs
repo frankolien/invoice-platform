@@ -78,7 +78,8 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
             .service(update)
             .service(send)
             .service(cancel)
-            .service(mark_viewed),
+            .service(mark_viewed)
+            .configure(crate::modules::payment::configure_invoice_scoped),
     );
 }
 
@@ -95,26 +96,91 @@ fn compute_totals(items: &[LineItem], tax_rate: Decimal) -> (Decimal, Decimal, D
 #[post("")]
 async fn create(
     pool: web::Data<DbPool>,
+    queues: web::Data<crate::jobs::JobQueues>,
     tenant: TenantContext,
     input: web::Json<CreateInvoiceInput>,
 ) -> AppResult<impl Responder> {
     input.validate().map_err(|e| AppError::Validation(e.to_string()))?;
 
+    let invoice = create_invoice(
+        pool.get_ref(),
+        tenant.org_id,
+        input.client_id,
+        Some(input.invoice_number.clone()),
+        &input.line_items,
+        input.tax_rate.unwrap_or(Decimal::ZERO),
+        input.currency.clone().unwrap_or_else(|| "USD".to_string()),
+        input.due_date,
+        input.notes.clone(),
+    )
+    .await?;
+
+    crate::jobs::dispatch_webhooks(
+        queues.get_ref(),
+        pool.get_ref(),
+        tenant.org_id,
+        "invoice.created",
+        serde_json::json!({
+            "invoice_id": invoice.id,
+            "invoice_number": invoice.invoice_number,
+            "total": invoice.total,
+            "client_id": invoice.client_id,
+        }),
+    )
+    .await;
+
+    Ok(HttpResponse::Created().json(invoice))
+}
+
+/// Auto-generates an invoice number in the format `INV-{year}-{0001}` per org.
+/// Uses a table count so it's deterministic within an org-year bucket. Not
+/// concurrency-safe beyond the unique(org_id, invoice_number) constraint — if
+/// two callers race, one gets a Conflict and the caller can retry.
+async fn generate_invoice_number(pool: &DbPool, org_id: Uuid) -> AppResult<String> {
+    let year = chrono::Utc::now().format("%Y").to_string();
+    let prefix = format!("INV-{year}-");
+    let count: (i64,) = sqlx::query_as(
+        "SELECT COUNT(*)::bigint FROM invoices WHERE org_id = $1 AND invoice_number LIKE $2",
+    )
+    .bind(org_id)
+    .bind(format!("{prefix}%"))
+    .fetch_one(pool)
+    .await?;
+    Ok(format!("{prefix}{:04}", count.0 + 1))
+}
+
+/// Internal invoice-creation service. The HTTP handler passes a user-supplied
+/// invoice_number; the recurring-invoice job passes None for auto-generation.
+#[allow(clippy::too_many_arguments)]
+pub(crate) async fn create_invoice(
+    pool: &DbPool,
+    org_id: Uuid,
+    client_id: Uuid,
+    invoice_number: Option<String>,
+    line_items: &[LineItem],
+    tax_rate: Decimal,
+    currency: String,
+    due_date: DateTime<Utc>,
+    notes: Option<String>,
+) -> AppResult<Invoice> {
     let client_exists: Option<(Uuid,)> = sqlx::query_as(
         "SELECT id FROM clients WHERE id = $1 AND org_id = $2 AND deleted_at IS NULL",
     )
-    .bind(input.client_id)
-    .bind(tenant.org_id)
-    .fetch_optional(pool.get_ref())
+    .bind(client_id)
+    .bind(org_id)
+    .fetch_optional(pool)
     .await?;
     if client_exists.is_none() {
         return Err(AppError::BadRequest("client not found in org".into()));
     }
 
-    let tax_rate = input.tax_rate.unwrap_or(Decimal::ZERO);
-    let (subtotal, tax_amount, total) = compute_totals(&input.line_items, tax_rate);
-    let currency = input.currency.clone().unwrap_or_else(|| "USD".to_string());
-    let line_items_json = serde_json::to_value(&input.line_items)
+    let invoice_number = match invoice_number {
+        Some(n) => n,
+        None => generate_invoice_number(pool, org_id).await?,
+    };
+
+    let (subtotal, tax_amount, total) = compute_totals(line_items, tax_rate);
+    let line_items_json = serde_json::to_value(line_items)
         .map_err(|e| AppError::internal(format!("line items serialize: {e}")))?;
 
     let invoice: Invoice = sqlx::query_as(
@@ -129,18 +195,18 @@ async fn create(
                   sent_at, viewed_at, paid_at, created_at, updated_at
         "#,
     )
-    .bind(tenant.org_id)
-    .bind(input.client_id)
-    .bind(&input.invoice_number)
+    .bind(org_id)
+    .bind(client_id)
+    .bind(&invoice_number)
     .bind(&line_items_json)
     .bind(subtotal)
     .bind(tax_rate)
     .bind(tax_amount)
     .bind(total)
     .bind(&currency)
-    .bind(input.due_date)
-    .bind(&input.notes)
-    .fetch_one(pool.get_ref())
+    .bind(due_date)
+    .bind(&notes)
+    .fetch_one(pool)
     .await
     .map_err(|e| match e {
         sqlx::Error::Database(db_err) if db_err.is_unique_violation() => {
@@ -149,7 +215,7 @@ async fn create(
         other => AppError::from(other),
     })?;
 
-    Ok(HttpResponse::Created().json(invoice))
+    Ok(invoice)
 }
 
 #[get("")]
@@ -288,6 +354,7 @@ async fn update(
 #[post("/{id}/send")]
 async fn send(
     pool: web::Data<DbPool>,
+    queues: web::Data<crate::jobs::JobQueues>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
 ) -> AppResult<impl Responder> {
@@ -306,14 +373,33 @@ async fn send(
     .fetch_optional(pool.get_ref())
     .await?;
 
-    inv.map(|i| HttpResponse::Ok().json(i)).ok_or_else(|| {
+    let invoice = inv.ok_or_else(|| {
         AppError::BadRequest("invoice not found or not in draft status".into())
-    })
+    })?;
+
+    // Fire-and-forget enqueue. If this fails, log but don't fail the request —
+    // the status transition already committed. The overdue worker + manual
+    // resend can recover. (TODO: outbox pattern for at-least-once guarantees.)
+    if let Err(e) = crate::jobs::enqueue_invoice_email(queues.get_ref(), invoice.id).await {
+        tracing::error!(error = %e, invoice_id = %invoice.id, "failed to enqueue invoice email");
+    }
+
+    crate::jobs::dispatch_webhooks(
+        queues.get_ref(),
+        pool.get_ref(),
+        tenant.org_id,
+        "invoice.sent",
+        serde_json::json!({ "invoice_id": invoice.id, "invoice_number": invoice.invoice_number, "total": invoice.total }),
+    )
+    .await;
+
+    Ok(HttpResponse::Ok().json(invoice))
 }
 
 #[post("/{id}/cancel")]
 async fn cancel(
     pool: web::Data<DbPool>,
+    queues: web::Data<crate::jobs::JobQueues>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
 ) -> AppResult<impl Responder> {
@@ -333,9 +419,18 @@ async fn cancel(
     .fetch_optional(pool.get_ref())
     .await?;
 
-    inv.map(|i| HttpResponse::Ok().json(i)).ok_or_else(|| {
-        AppError::BadRequest("invoice not cancellable".into())
-    })
+    let invoice = inv.ok_or_else(|| AppError::BadRequest("invoice not cancellable".into()))?;
+
+    crate::jobs::dispatch_webhooks(
+        queues.get_ref(),
+        pool.get_ref(),
+        tenant.org_id,
+        "invoice.cancelled",
+        serde_json::json!({ "invoice_id": invoice.id, "invoice_number": invoice.invoice_number }),
+    )
+    .await;
+
+    Ok(HttpResponse::Ok().json(invoice))
 }
 
 #[post("/{id}/viewed")]

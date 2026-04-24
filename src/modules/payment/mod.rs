@@ -48,16 +48,22 @@ pub struct RefundInput {
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
-    cfg.service(
-        web::scope("/invoices/{invoice_id}")
-            .service(create_checkout)
-            .service(list_payments_for_invoice),
-    )
-    .service(web::scope("/payments").service(refund));
+    // Payment routes under /v1/payments. The invoice-scoped payment routes
+    // (/invoices/:id/pay and /invoices/:id/payments) are registered by the
+    // invoice module via `configure_invoice_scoped` below so they live
+    // inside the existing `/invoices` scope and Actix routes them correctly.
+    cfg.service(web::scope("/payments").service(refund));
     // /webhooks/stripe registered separately (no tenant context)
 }
 
-#[post("/pay")]
+/// Routes that need to live inside the `/invoices` scope. Called from
+/// `modules::invoice::configure`.
+pub fn configure_invoice_scoped(cfg: &mut web::ServiceConfig) {
+    cfg.service(create_checkout)
+        .service(list_payments_for_invoice);
+}
+
+#[post("/{invoice_id}/pay")]
 async fn create_checkout(
     req: HttpRequest,
     pool: web::Data<DbPool>,
@@ -191,7 +197,7 @@ async fn create_checkout(
     Ok(HttpResponse::Created().json(response))
 }
 
-#[get("/payments")]
+#[get("/{invoice_id}/payments")]
 async fn list_payments_for_invoice(
     pool: web::Data<DbPool>,
     tenant: TenantContext,

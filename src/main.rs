@@ -4,6 +4,7 @@ use tracing_actix_web::TracingLogger;
 use invoice_platform::auth::jwt::TokenService;
 use invoice_platform::cache::Cache;
 use invoice_platform::config::Config;
+use invoice_platform::jobs;
 use invoice_platform::modules::payment::stripe_client::StripeClient;
 use invoice_platform::observability::init_tracing;
 use invoice_platform::{AppState, build_app, db};
@@ -20,6 +21,10 @@ async fn main() -> anyhow::Result<()> {
 
     let cache = Cache::connect(&cfg.redis_url).await?;
     tracing::info!("redis connected");
+
+    let queues = jobs::connect(&cfg.redis_url).await?;
+    jobs::spawn_workers(queues.clone(), pool.clone(), cfg.app_url.clone());
+    tracing::info!("job workers spawned");
 
     let stripe = match (&cfg.stripe_secret_key, &cfg.stripe_webhook_secret) {
         (Some(sk), Some(ws)) => {
@@ -40,7 +45,7 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let port = cfg.port;
-    let state = AppState::new(pool, tokens, cache, cfg, stripe)?;
+    let state = AppState::new(pool, tokens, cache, cfg, stripe, queues)?;
 
     let server = HttpServer::new(move || build_app(state.clone()).wrap(TracingLogger::default()))
         .bind(("0.0.0.0", port))?
