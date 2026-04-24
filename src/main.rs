@@ -2,7 +2,9 @@ use actix_web::HttpServer;
 use tracing_actix_web::TracingLogger;
 
 use invoice_platform::auth::jwt::TokenService;
+use invoice_platform::cache::Cache;
 use invoice_platform::config::Config;
+use invoice_platform::modules::payment::stripe_client::StripeClient;
 use invoice_platform::observability::init_tracing;
 use invoice_platform::{AppState, build_app, db};
 
@@ -16,6 +18,20 @@ async fn main() -> anyhow::Result<()> {
     let pool = db::connect(&cfg.database_url).await?;
     tracing::info!("postgres connected, migrations applied");
 
+    let cache = Cache::connect(&cfg.redis_url).await?;
+    tracing::info!("redis connected");
+
+    let stripe = match (&cfg.stripe_secret_key, &cfg.stripe_webhook_secret) {
+        (Some(sk), Some(ws)) => {
+            tracing::info!("stripe configured");
+            Some(StripeClient::new(sk, ws))
+        }
+        _ => {
+            tracing::warn!("stripe not configured — /pay, /refund, /webhooks/stripe disabled");
+            None
+        }
+    };
+
     let tokens = TokenService::new(
         cfg.jwt_secret.clone(),
         cfg.jwt_refresh_secret.clone(),
@@ -23,8 +39,8 @@ async fn main() -> anyhow::Result<()> {
         cfg.refresh_token_ttl_secs,
     );
 
-    let state = AppState::new(pool, tokens)?;
     let port = cfg.port;
+    let state = AppState::new(pool, tokens, cache, cfg, stripe)?;
 
     let server = HttpServer::new(move || build_app(state.clone()).wrap(TracingLogger::default()))
         .bind(("0.0.0.0", port))?

@@ -7,6 +7,8 @@ use sqlx::PgPool;
 use uuid::Uuid;
 
 use invoice_platform::auth::jwt::TokenService;
+use invoice_platform::cache::Cache;
+use invoice_platform::config::Config;
 use invoice_platform::{AppState, build_app};
 
 pub const TEST_ACCESS_SECRET: &str = "test-access-secret";
@@ -21,11 +23,32 @@ pub fn token_service() -> TokenService {
     )
 }
 
+fn test_config() -> Config {
+    Config {
+        port: 0,
+        env: "test".into(),
+        database_url: String::new(),
+        redis_url: std::env::var("REDIS_URL")
+            .unwrap_or_else(|_| "redis://localhost:6380".into()),
+        app_url: "http://localhost:3000".into(),
+        jwt_secret: TEST_ACCESS_SECRET.into(),
+        jwt_refresh_secret: TEST_REFRESH_SECRET.into(),
+        access_token_ttl_secs: 900,
+        refresh_token_ttl_secs: 604_800,
+        stripe_secret_key: None,
+        stripe_webhook_secret: None,
+    }
+}
+
 pub async fn make_app(
     pool: PgPool,
 ) -> impl Service<Request, Response = ServiceResponse<impl MessageBody>, Error = actix_web::Error>
 {
-    let state = AppState::new(pool, token_service()).expect("build state");
+    let cfg = test_config();
+    let cache = Cache::connect(&cfg.redis_url)
+        .await
+        .expect("connect redis (is docker compose up?)");
+    let state = AppState::new(pool, token_service(), cache, cfg, None).expect("build state");
     test::init_service(build_app(state)).await
 }
 

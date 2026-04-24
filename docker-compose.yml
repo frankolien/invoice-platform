@@ -15,17 +15,33 @@ services:
       timeout: 3s
       retries: 10
 
+  redis:
+    image: redis:7-alpine
+    ports:
+      - "6380:6379"
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 10
+
   api:
     build: .
     depends_on:
       postgres:
         condition: service_healthy
+      redis:
+        condition: service_healthy
     environment:
       PORT: 3000
       APP_ENV: development
       DATABASE_URL: postgres://invoice:invoice@postgres:5432/invoice_platform
+      REDIS_URL: redis://redis:6379
+      APP_URL: http://localhost:3000
       JWT_SECRET: dev-access-secret-change-me
       JWT_REFRESH_SECRET: dev-refresh-secret-change-me
+      STRIPE_SECRET_KEY: ""
+      STRIPE_WEBHOOK_SECRET: ""
       RUST_LOG: info,sqlx=warn
     ports:
       - "3000:3000"
