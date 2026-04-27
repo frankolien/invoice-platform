@@ -1,95 +1,205 @@
 # Invoice Platform (Rust / Actix Web)
 
-A port of the Node/Fastify Invoice Platform to Rust, using Actix Web and Postgres.
-
-This is an **MVP skeleton** — the goal of this iteration is a compiling, runnable backend with the core resources (auth, orgs, clients, invoices). The rest (payments, queues, webhooks, recurring invoices, analytics, observability stack) will be layered on incrementally.
+A multi-tenant invoicing API ported from the Node/Fastify [Invoice Platform](../Invoice-platform/). Stripe payments, recurring invoices, outbound webhooks, background workers, rate limiting, circuit breakers, Prometheus metrics, audit log.
 
 ## Stack
 
-- **Web:** Actix Web 4
-- **Database:** Postgres via sqlx (async, compile-time-free runtime queries)
-- **Auth:** JWT (HS256) + Argon2 password hashing
-- **Logging:** tracing + tracing-subscriber (JSON output)
-- **Metrics:** prometheus crate at `/metrics`
-- **Decimals:** rust_decimal (no float weirdness for money)
+| Layer | Choice |
+|---|---|
+| Web | Actix Web 4 |
+| Database | Postgres via sqlx (async, runtime queries) |
+| Cache + queue | Redis (via apalis 0.7) |
+| Auth | JWT (HS256) + Argon2 |
+| Payments | async-stripe 0.40 |
+| Webhooks (out) | reqwest, HMAC-SHA256 signed |
+| Background jobs | apalis + apalis-cron |
+| Reliability | Custom circuit breaker (3 instances) |
+| Logging | tracing + tracing-subscriber (JSON) |
+| Metrics | prometheus crate at `/metrics` |
+| Decimals | rust_decimal (no float weirdness for money) |
 
 ## Running
 
-### With Docker Compose (recommended)
+### With Docker Compose
 
 ```bash
-docker compose up --build
+docker compose up -d            # full stack: api + postgres + redis
+docker compose up -d postgres redis   # just deps (for cargo run / cargo test)
 ```
 
-Brings up Postgres and the API. Migrations run automatically on API boot.
+Postgres is mapped to host **port 5433** to avoid colliding with a local Postgres on 5432.
+Redis is on **port 6380** for the same reason.
 
 ### Locally
 
-1. Start Postgres:
-   ```bash
-   docker run --rm -p 5432:5432 \
-     -e POSTGRES_USER=invoice -e POSTGRES_PASSWORD=invoice -e POSTGRES_DB=invoice_platform \
-     postgres:16-alpine
-   ```
-2. Copy env: `cp .env.example .env`
-3. Run: `cargo run`
+```bash
+docker compose up -d postgres redis
+cp .env.example .env       # edit secrets if you want
+cargo run
+```
+
+### Tests
+
+```bash
+DATABASE_URL="postgres://invoice:invoice@localhost:5433/invoice_platform" \
+REDIS_URL="redis://localhost:6380" \
+cargo test
+```
+
+28 tests: 2 unit (circuit breaker) + 5 auth + 6 org + 3 client + 4 invoice + 1 isolation + 7 payment.
 
 ## Endpoints
 
 ### Public
 - `GET /` — service info
-- `GET /health` — liveness + Postgres check
-- `GET /ready` — readiness
-- `GET /metrics` — Prometheus metrics
+- `GET /health`, `GET /ready` — probes
+- `GET /metrics` — Prometheus
 
 ### `/v1/auth`
-- `POST /register` — `{ email, password, name }`
-- `POST /login` — `{ email, password }`
-- `POST /refresh` — `{ refresh_token }`
+- `POST /register`, `POST /login`, `POST /refresh`
 
-### `/v1/organizations` (Bearer token required)
-- `POST /` — create org, creator becomes owner
-- `GET /:id`
-- `PATCH /:id` — owner/admin only
-- `POST /:id/invite` — add member by email
+### `/v1/organizations` (Bearer)
+- `POST /`, `GET /:id`, `PATCH /:id`, `POST /:id/invite`
 
-### `/v1/clients` (Bearer + `x-org-id` header)
-- `POST /`, `GET /`, `GET /:id`, `PATCH /:id`, `DELETE /:id` (soft delete)
+### `/v1/clients` (Bearer + `x-org-id`)
+- Full CRUD + soft delete
 
 ### `/v1/invoices` (Bearer + `x-org-id`)
 - `POST /`, `GET /`, `GET /:id`, `PATCH /:id` (draft only)
-- `POST /:id/send` — draft → sent
-- `POST /:id/cancel`
-- `POST /:id/viewed`
+- `POST /:id/send`, `POST /:id/cancel`, `POST /:id/viewed`
+- `POST /:id/pay` — Stripe checkout, supports `Idempotency-Key`
+- `GET /:id/payments` — list payments
 
-## Roadmap (not yet in this skeleton)
+### `/v1/payments` (Bearer + `x-org-id`)
+- `POST /:id/refund` — full or partial
 
-- Payments (Stripe) + idempotency
-- Background jobs (apalis + Redis): invoice email, PDF gen, recurring invoices, overdue scan
-- Outbound webhooks with HMAC signing
-- Analytics endpoints
-- Circuit breakers for external services
-- OpenTelemetry tracing export
-- Rate limiting
-- Full tests
+### `/v1/recurring-invoices` (Bearer + `x-org-id`)
+- Full CRUD + `pause` / `resume` / `cancel`
+
+### `/v1/webhook-subscriptions` (Bearer + `x-org-id`)
+- Full CRUD + `POST /:id/test` (synchronous test delivery)
+
+### `/v1/analytics` (Bearer + `x-org-id`)
+- `GET /revenue?from=&to=&currency=` — total + monthly breakdown
+- `GET /invoices?from=&to=` — counts per status + live overdue summary
+
+### `/v1/webhooks/stripe`
+- Stripe webhook receiver (signature verified, deduplicated via Redis 48h)
+
+## Background workers
+
+All run in-process as tokio tasks, spawned at boot.
+
+| Worker | Trigger | Concurrency | Retries |
+|---|---|---|---|
+| `invoice-email` | After `POST /invoices/:id/send` | 5 | 3 |
+| `webhook-delivery` | Business event → `dispatch_webhooks` | 10 | 8 |
+| `recurring-create` | Scanned by cron, materializes a real invoice | 3 | 3 |
+| `overdue-scan` (cron) | Hourly | 1 | — |
+| `recurring-scan` (cron) | Every 15 minutes | 1 | — |
+
+Email is currently a `LogEmailSender` stub. Implement the `EmailSender` trait for Resend/SES/SMTP and swap in [src/jobs/mod.rs](src/jobs/mod.rs).
+
+## Outbound webhook events
+
+Emitted automatically when the corresponding state change occurs:
+
+- `invoice.created`, `invoice.sent`, `invoice.paid`, `invoice.overdue`, `invoice.cancelled`
+- `payment.succeeded`, `payment.failed`
+
+Customers register via `POST /v1/webhook-subscriptions` and receive an HMAC-signed POST. Headers: `X-Signature`, `X-Timestamp`, `X-Event-Type`, `X-Delivery-Id`.
+
+## Reliability
+
+### Circuit breakers ([src/circuit_breaker/mod.rs](src/circuit_breaker/mod.rs))
+
+Three pre-configured instances, mirroring the TS app:
+
+| Service | Failure threshold | Cooldown | Recovery threshold |
+|---|---|---|---|
+| Stripe | 5 | 30s | 2 |
+| Email | 3 | 60s | 1 |
+| Webhook | 10 | 15s | 3 |
+
+State exported as `circuit_breaker_state{service}` Prometheus gauge.
+
+### Idempotency
+
+`POST /v1/invoices/:id/pay` honors an `Idempotency-Key` header. Same key within 24h returns the cached response without re-creating a Stripe session.
+
+### Stripe webhook deduplication
+
+Each Stripe event ID stored in Redis with 48h TTL. Replays return `200 {deduplicated: true}` without re-processing.
+
+### Rate limiting
+
+200 req/min per `x-org-id` (or per IP if no org). Redis fixed-window. Returns `429` with `Retry-After`. Skips `/health`, `/ready`, `/metrics`. Fails open if Redis is down.
+
+### Audit log
+
+Every POST/PATCH/PUT/DELETE under `/v1` logs `{user_id, org_id, method, path, status}` as a structured tracing event.
+
+## Metrics
+
+`GET /metrics` (Prometheus text format):
+
+| Metric | Type | Labels |
+|---|---|---|
+| `http_requests_total` | counter | method, route, status |
+| `http_request_duration_seconds` | histogram | method, route, status |
+| `invoices_created_total` | counter | org_id |
+| `payments_processed_total` | counter | org_id, status |
+| `circuit_breaker_state` | gauge | service (0=closed, 1=open, 2=half-open) |
+
+Route labels use Actix's matched pattern (e.g. `/v1/invoices/{id}`) so cardinality stays bounded.
 
 ## Project layout
 
 ```
 src/
-├── main.rs                       # app bootstrap + graceful shutdown
+├── main.rs                       # bootstrap, worker spawn, graceful shutdown
+├── lib.rs                        # AppState + build_app factory
 ├── config/                       # env loading
 ├── db/                           # sqlx pool + migrations
+├── cache/                        # Redis wrapper
+├── circuit_breaker/              # CLOSED/OPEN/HALF_OPEN state machine
 ├── error/                        # AppError + ResponseError impl
-├── auth/                         # jwt + password hashing
+├── auth/                         # JWT + Argon2
 ├── middleware/
-│   ├── auth_user.rs              # Bearer-token extractor (FromRequest)
-│   └── tenant.rs                 # x-org-id + membership check extractor
+│   ├── auth_user.rs              # Bearer JWT extractor
+│   ├── tenant.rs                 # x-org-id + membership extractor
+│   ├── rate_limit.rs             # Redis fixed-window
+│   ├── audit_log.rs              # structured audit events
+│   └── metrics.rs                # HTTP request counter + histogram
 ├── modules/
-│   ├── auth/                     # register, login, refresh
-│   ├── organization/             # create, get, update, invite
-│   ├── client/                   # crud + soft delete
-│   └── invoice/                  # crud + send/cancel/viewed
-└── observability/                # tracing init, health, metrics
+│   ├── auth/                     # register/login/refresh
+│   ├── organization/             # create/get/update/invite
+│   ├── client/                   # CRUD + soft delete
+│   ├── invoice/                  # CRUD + status transitions + service fn
+│   ├── payment/                  # Stripe checkout + refund + webhook
+│   ├── recurring_invoice/        # CRUD + pause/resume/cancel
+│   ├── webhook_subscription/     # CRUD + /test
+│   └── analytics/                # revenue + invoices reports
+├── jobs/
+│   ├── mod.rs                    # JobQueues + spawn_workers + dispatch_webhooks
+│   ├── email.rs                  # EmailSender trait + LogEmailSender stub
+│   ├── invoice_email.rs          # SendInvoiceEmail handler
+│   ├── webhook_delivery.rs       # HMAC-signed delivery + reqwest
+│   ├── recurring.rs              # scan + materialize
+│   └── overdue.rs                # cron handler
+└── observability/
+    ├── mod.rs                    # tracing init
+    ├── health.rs                 # / + /health + /ready
+    └── metrics.rs                # Prometheus registry + /metrics
 migrations/                       # sqlx-managed SQL
+tests/                            # integration tests
 ```
+
+## What's not (yet) ported from the Node original
+
+- OpenTelemetry tracing export (Jaeger)
+- PDF generation
+- OpenAPI / Swagger UI
+- Bull Board queue dashboard equivalent
+- k6 load tests
+- Real email sender (Resend/SES) — only the log-only stub

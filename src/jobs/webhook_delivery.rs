@@ -65,7 +65,7 @@ pub async fn handle(
 }
 
 /// Synchronous single-shot delivery used by the /test endpoint. Same signing
-/// + headers as the queue path, but errors bubble to the HTTP response
+/// and headers as the queue path, but errors bubble to the HTTP response
 /// instead of retrying.
 pub async fn deliver_once(
     url: &str,

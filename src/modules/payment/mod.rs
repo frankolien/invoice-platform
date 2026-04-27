@@ -65,6 +65,7 @@ pub fn configure_invoice_scoped(cfg: &mut web::ServiceConfig) {
 }
 
 #[post("/{invoice_id}/pay")]
+#[allow(clippy::too_many_arguments)]
 async fn create_checkout(
     req: HttpRequest,
     pool: web::Data<DbPool>,

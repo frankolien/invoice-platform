@@ -20,9 +20,9 @@ impl StripeClient {
     }
 }
 
-pub fn require_stripe<'a>(
-    client: Option<&'a actix_web::web::Data<StripeClient>>,
-) -> AppResult<&'a StripeClient> {
+pub fn require_stripe(
+    client: Option<&actix_web::web::Data<StripeClient>>,
+) -> AppResult<&StripeClient> {
     client
         .map(|c| c.get_ref())
         .ok_or_else(|| AppError::BadRequest("stripe is not configured".into()))

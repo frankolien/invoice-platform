@@ -60,6 +60,10 @@ pub async fn make_app(
     test::init_service(build_app(state)).await
 }
 
+// Each integration test crate analyses dead code independently, so a field
+// used by one test file but not another triggers a per-crate warning here.
+// Allow it on the shared helpers.
+#[allow(dead_code)]
 pub struct SeededUser {
     pub id: Uuid,
     pub email: String,
@@ -90,11 +94,13 @@ where
     }
 }
 
+#[allow(dead_code)]
 pub struct SeededOrg {
     pub id: Uuid,
     pub slug: String,
 }
 
+#[allow(dead_code)]
 pub async fn seed_org<S, B>(app: &S, token: &str, slug_prefix: &str) -> SeededOrg
 where
     S: Service<Request, Response = ServiceResponse<B>, Error = actix_web::Error>,
