@@ -3,6 +3,7 @@ use tracing_actix_web::TracingLogger;
 
 use invoice_platform::auth::jwt::TokenService;
 use invoice_platform::cache::Cache;
+use invoice_platform::circuit_breaker::CircuitBreakers;
 use invoice_platform::config::Config;
 use invoice_platform::jobs;
 use invoice_platform::modules::payment::stripe_client::StripeClient;
@@ -23,7 +24,13 @@ async fn main() -> anyhow::Result<()> {
     tracing::info!("redis connected");
 
     let queues = jobs::connect(&cfg.redis_url).await?;
-    jobs::spawn_workers(queues.clone(), pool.clone(), cfg.app_url.clone());
+    let breakers = CircuitBreakers::new();
+    jobs::spawn_workers(
+        queues.clone(),
+        pool.clone(),
+        cfg.app_url.clone(),
+        breakers.clone(),
+    );
     tracing::info!("job workers spawned");
 
     let stripe = match (&cfg.stripe_secret_key, &cfg.stripe_webhook_secret) {
@@ -45,7 +52,10 @@ async fn main() -> anyhow::Result<()> {
     );
 
     let port = cfg.port;
-    let state = AppState::new(pool, tokens, cache, cfg, stripe, queues)?;
+    let mut state = AppState::new(pool, tokens, cache, cfg, stripe, queues)?;
+    // Replace the AppState's default breakers with the shared instance we
+    // also gave to the workers, so HTTP + workers see the same state.
+    state.breakers = actix_web::web::Data::new(breakers);
 
     let server = HttpServer::new(move || build_app(state.clone()).wrap(TracingLogger::default()))
         .bind(("0.0.0.0", port))?

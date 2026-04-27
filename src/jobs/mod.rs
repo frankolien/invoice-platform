@@ -15,6 +15,7 @@ use apalis_redis::RedisStorage;
 use reqwest::Client;
 use uuid::Uuid;
 
+use crate::circuit_breaker::CircuitBreakers;
 use crate::db::DbPool;
 use crate::jobs::email::{EmailSender, LogEmailSender};
 use crate::jobs::invoice_email::SendInvoiceEmail;
@@ -40,7 +41,12 @@ pub async fn connect(redis_url: &str) -> anyhow::Result<JobQueues> {
 
 /// Spawns every background worker on the current tokio runtime and returns
 /// immediately. Each worker runs for the lifetime of the process.
-pub fn spawn_workers(queues: JobQueues, pool: DbPool, app_url: String) {
+pub fn spawn_workers(
+    queues: JobQueues,
+    pool: DbPool,
+    app_url: String,
+    breakers: CircuitBreakers,
+) {
     let sender: Arc<dyn EmailSender> = Arc::new(LogEmailSender);
 
     // --- invoice email worker ---
@@ -69,11 +75,13 @@ pub fn spawn_workers(queues: JobQueues, pool: DbPool, app_url: String) {
         .build()
         .expect("build reqwest client");
     let webhook_storage = queues.webhook_delivery.clone();
+    let webhook_breaker = breakers.webhook.clone();
     tokio::spawn(async move {
         WorkerBuilder::new("webhook-delivery")
             .concurrency(10)
             .retry(RetryPolicy::retries(8))
             .data(http_client)
+            .data(webhook_breaker)
             .backend(webhook_storage)
             .build_fn(webhook_delivery::handle)
             .run()

@@ -97,6 +97,7 @@ fn compute_totals(items: &[LineItem], tax_rate: Decimal) -> (Decimal, Decimal, D
 async fn create(
     pool: web::Data<DbPool>,
     queues: web::Data<crate::jobs::JobQueues>,
+    metrics: web::Data<crate::observability::metrics::Metrics>,
     tenant: TenantContext,
     input: web::Json<CreateInvoiceInput>,
 ) -> AppResult<impl Responder> {
@@ -114,6 +115,11 @@ async fn create(
         input.notes.clone(),
     )
     .await?;
+
+    metrics
+        .invoices_created_total
+        .with_label_values(&[&tenant.org_id.to_string()])
+        .inc();
 
     crate::jobs::dispatch_webhooks(
         queues.get_ref(),

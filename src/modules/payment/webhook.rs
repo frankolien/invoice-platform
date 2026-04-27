@@ -9,6 +9,7 @@ use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::jobs::{JobQueues, dispatch_webhooks};
 use crate::modules::payment::stripe_client::{StripeClient, require_stripe};
+use crate::observability::metrics::Metrics;
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::scope("/webhooks").service(stripe_webhook));
@@ -21,6 +22,7 @@ async fn stripe_webhook(
     pool: web::Data<DbPool>,
     cache: web::Data<Cache>,
     queues: web::Data<JobQueues>,
+    metrics: web::Data<Metrics>,
     stripe: Option<web::Data<StripeClient>>,
 ) -> AppResult<impl Responder> {
     let stripe = require_stripe(stripe.as_ref())?;
@@ -55,12 +57,12 @@ async fn stripe_webhook(
         }
         EventType::PaymentIntentSucceeded => {
             if let EventObject::PaymentIntent(pi) = event.data.object {
-                handle_payment_succeeded(&pool, &queues, pi).await?;
+                handle_payment_succeeded(&pool, &queues, &metrics, pi).await?;
             }
         }
         EventType::PaymentIntentPaymentFailed => {
             if let EventObject::PaymentIntent(pi) = event.data.object {
-                handle_payment_failed(&pool, &queues, pi).await?;
+                handle_payment_failed(&pool, &queues, &metrics, pi).await?;
             }
         }
         other => {
@@ -104,6 +106,7 @@ async fn handle_checkout_completed(
 async fn handle_payment_succeeded(
     pool: &DbPool,
     queues: &JobQueues,
+    metrics: &Metrics,
     pi: stripe::PaymentIntent,
 ) -> AppResult<()> {
     let pi_id = pi.id.as_str();
@@ -127,6 +130,11 @@ async fn handle_payment_succeeded(
         tracing::warn!(payment_intent_id = %pi_id, "payment_intent.succeeded for unknown payment");
         return Ok(());
     };
+
+    metrics
+        .payments_processed_total
+        .with_label_values(&[&org_id.to_string(), "succeeded"])
+        .inc();
 
     dispatch_webhooks(
         queues,
@@ -159,6 +167,7 @@ async fn handle_payment_succeeded(
 async fn handle_payment_failed(
     pool: &DbPool,
     queues: &JobQueues,
+    metrics: &Metrics,
     pi: stripe::PaymentIntent,
 ) -> AppResult<()> {
     let pi_id = pi.id.as_str();
@@ -184,6 +193,11 @@ async fn handle_payment_failed(
     .await?;
 
     if let Some((payment_id, org_id, invoice_id)) = updated {
+        metrics
+            .payments_processed_total
+            .with_label_values(&[&org_id.to_string(), "failed"])
+            .inc();
+
         dispatch_webhooks(
             queues,
             pool,

@@ -7,6 +7,8 @@ use serde::{Deserialize, Serialize};
 use sha2::Sha256;
 use uuid::Uuid;
 
+use crate::circuit_breaker::{BreakerError, CircuitBreaker};
+
 type HmacSha256 = Hmac<Sha256>;
 
 const DELIVERY_TIMEOUT: Duration = Duration::from_secs(10);
@@ -30,26 +32,36 @@ pub struct DeliverWebhook {
 pub async fn handle(
     job: DeliverWebhook,
     client: Data<Client>,
+    breaker: Data<CircuitBreaker>,
 ) -> Result<(), Error> {
-    let status = deliver_with_client(&client, &job.url, &job.secret, &job.event, &job.payload)
-        .await
-        .map_err(|e| Error::from(Box::new(std::io::Error::other(e.to_string())) as BoxDynError))?;
+    // Wrap the actual HTTP call in the breaker. Open breaker -> immediate
+    // job failure (apalis retries with backoff; by the time the next attempt
+    // fires, cooldown may have elapsed and we probe).
+    let result = breaker
+        .call(|| deliver_with_client(&client, &job.url, &job.secret, &job.event, &job.payload))
+        .await;
 
-    if !(200..300).contains(&status) {
-        // Non-2xx -> return Err so apalis retries with backoff.
-        return Err(Error::from(Box::new(std::io::Error::other(format!(
+    match result {
+        Ok(status) if (200..300).contains(&status) => {
+            tracing::info!(
+                delivery_id = %job.delivery_id,
+                event = %job.event,
+                url = %job.url,
+                status,
+                "webhook delivered"
+            );
+            Ok(())
+        }
+        Ok(status) => Err(Error::from(Box::new(std::io::Error::other(format!(
             "webhook delivery non-2xx: {status}"
-        ))) as BoxDynError));
+        ))) as BoxDynError)),
+        Err(BreakerError::Open) => Err(Error::from(Box::new(std::io::Error::other(
+            "webhook circuit breaker open",
+        )) as BoxDynError)),
+        Err(BreakerError::Inner(e)) => Err(Error::from(
+            Box::new(std::io::Error::other(e.to_string())) as BoxDynError,
+        )),
     }
-
-    tracing::info!(
-        delivery_id = %job.delivery_id,
-        event = %job.event,
-        url = %job.url,
-        status,
-        "webhook delivered"
-    );
-    Ok(())
 }
 
 /// Synchronous single-shot delivery used by the /test endpoint. Same signing

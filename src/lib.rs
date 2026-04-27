@@ -1,5 +1,6 @@
 pub mod auth;
 pub mod cache;
+pub mod circuit_breaker;
 pub mod config;
 pub mod db;
 pub mod error;
@@ -14,6 +15,7 @@ use actix_web::{App, web};
 
 use crate::auth::jwt::TokenService;
 use crate::cache::Cache;
+use crate::circuit_breaker::CircuitBreakers;
 use crate::config::Config;
 use crate::db::DbPool;
 use crate::jobs::JobQueues;
@@ -29,6 +31,7 @@ pub struct AppState {
     pub config: web::Data<Config>,
     pub stripe: Option<web::Data<StripeClient>>,
     pub queues: web::Data<JobQueues>,
+    pub breakers: web::Data<CircuitBreakers>,
 }
 
 impl AppState {
@@ -48,6 +51,7 @@ impl AppState {
             config: web::Data::new(config),
             stripe: stripe.map(web::Data::new),
             queues: web::Data::new(queues),
+            breakers: web::Data::new(CircuitBreakers::new()),
         })
     }
 }
@@ -70,6 +74,7 @@ pub fn build_app(
         .app_data(state.cache)
         .app_data(state.config)
         .app_data(state.queues)
+        .app_data(state.breakers)
         .app_data(web::JsonConfig::default().limit(1024 * 1024))
         .app_data(web::PayloadConfig::default().limit(1024 * 1024));
 
@@ -77,7 +82,10 @@ pub fn build_app(
         app = app.app_data(stripe);
     }
 
-    app.configure(observability::health::configure)
+    app.wrap(actix_web::middleware::from_fn(
+        middleware::metrics::http_metrics,
+    ))
+        .configure(observability::health::configure)
         .configure(observability::metrics::configure)
         .service(
             // Only /v1 is rate-limited + audited. Health, metrics, and root

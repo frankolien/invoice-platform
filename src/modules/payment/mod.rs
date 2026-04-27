@@ -18,6 +18,7 @@ use stripe::{
 use uuid::Uuid;
 
 use crate::cache::Cache;
+use crate::circuit_breaker::{BreakerError, CircuitBreakers};
 use crate::config::Config;
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
@@ -69,6 +70,7 @@ async fn create_checkout(
     pool: web::Data<DbPool>,
     cache: web::Data<Cache>,
     cfg: web::Data<Config>,
+    breakers: web::Data<CircuitBreakers>,
     stripe: Option<web::Data<StripeClient>>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -173,9 +175,18 @@ async fn create_checkout(
     meta.insert("payment_id".to_string(), payment.id.to_string());
     params.metadata = Some(meta);
 
-    let session = CheckoutSession::create(&stripe.client, params)
+    let session = breakers
+        .stripe
+        .call(|| CheckoutSession::create(&stripe.client, params))
         .await
-        .map_err(|e| AppError::internal(format!("stripe create session: {e}")))?;
+        .map_err(|e| match e {
+            BreakerError::Open => AppError::Internal(
+                "stripe circuit breaker open — try again shortly".into(),
+            ),
+            BreakerError::Inner(err) => {
+                AppError::internal(format!("stripe create session: {err}"))
+            }
+        })?;
 
     // Record the session id on our payment row
     sqlx::query(
@@ -235,6 +246,7 @@ async fn list_payments_for_invoice(
 #[post("/{id}/refund")]
 async fn refund(
     pool: web::Data<DbPool>,
+    breakers: web::Data<CircuitBreakers>,
     stripe: Option<web::Data<StripeClient>>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -285,9 +297,16 @@ async fn refund(
     );
     params.amount = amount_cents;
 
-    let stripe_refund = Refund::create(&stripe.client, params)
+    let stripe_refund = breakers
+        .stripe
+        .call(|| Refund::create(&stripe.client, params))
         .await
-        .map_err(|e| AppError::internal(format!("stripe refund: {e}")))?;
+        .map_err(|e| match e {
+            BreakerError::Open => AppError::Internal(
+                "stripe circuit breaker open — try again shortly".into(),
+            ),
+            BreakerError::Inner(err) => AppError::internal(format!("stripe refund: {err}")),
+        })?;
 
     // Update local status: full refund → 'refunded', partial → 'partially_refunded'
     let new_status = if amount_cents.is_some() {
