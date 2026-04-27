@@ -38,6 +38,7 @@ fn test_config() -> Config {
         refresh_token_ttl_secs: 604_800,
         stripe_secret_key: None,
         stripe_webhook_secret: None,
+        otel_endpoint: None,
     }
 }
 

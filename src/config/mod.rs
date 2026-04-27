@@ -13,6 +13,9 @@ pub struct Config {
     pub refresh_token_ttl_secs: i64,
     pub stripe_secret_key: Option<String>,
     pub stripe_webhook_secret: Option<String>,
+    /// OTLP HTTP endpoint for span export (Jaeger / OTel collector). When
+    /// `None` (env var unset or empty), tracing stays log-only.
+    pub otel_endpoint: Option<String>,
 }
 
 impl Config {
@@ -39,6 +42,9 @@ impl Config {
                 .parse()?,
             stripe_secret_key: env::var("STRIPE_SECRET_KEY").ok().filter(|s| !s.is_empty()),
             stripe_webhook_secret: env::var("STRIPE_WEBHOOK_SECRET")
+                .ok()
+                .filter(|s| !s.is_empty()),
+            otel_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .ok()
                 .filter(|s| !s.is_empty()),
         })

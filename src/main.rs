@@ -12,9 +12,15 @@ use invoice_platform::{AppState, build_app, db};
 
 #[actix_web::main]
 async fn main() -> anyhow::Result<()> {
-    init_tracing();
-
     let cfg = Config::from_env()?;
+    let tracer_provider = init_tracing(cfg.otel_endpoint.as_deref());
+    if cfg.otel_endpoint.is_some() {
+        tracing::info!(
+            endpoint = cfg.otel_endpoint.as_deref(),
+            "otel exporter enabled"
+        );
+    }
+
     tracing::info!(port = cfg.port, env = %cfg.env, "starting invoice-platform");
 
     let pool = db::connect(&cfg.database_url).await?;
@@ -72,6 +78,15 @@ async fn main() -> anyhow::Result<()> {
     });
 
     server.await?;
+
+    // Drain spans to the OTel collector before exit. Important — without
+    // this, the last batch of spans can be lost on shutdown.
+    if let Some(p) = tracer_provider {
+        if let Err(e) = p.shutdown() {
+            tracing::warn!(error = %e, "otel tracer shutdown");
+        }
+    }
+
     tracing::info!("shutdown complete");
     Ok(())
 }
