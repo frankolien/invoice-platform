@@ -97,6 +97,7 @@ pub fn build_app(
                 .configure(modules::payment::configure)
                 .configure(modules::payment::webhook::configure)
                 .configure(modules::webhook_subscription::configure)
-                .configure(modules::recurring_invoice::configure),
+                .configure(modules::recurring_invoice::configure)
+                .configure(modules::analytics::configure),
         )
 }
