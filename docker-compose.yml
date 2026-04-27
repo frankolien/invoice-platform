@@ -50,7 +50,9 @@ services:
       JWT_REFRESH_SECRET: dev-refresh-secret-change-me
       STRIPE_SECRET_KEY: ""
       STRIPE_WEBHOOK_SECRET: ""
-      OTEL_EXPORTER_OTLP_ENDPOINT: http://jaeger:4318
+      # Temporarily disabled while we debug span export — empty value =
+      # log-only tracing. To re-enable, set to http://jaeger:4318
+      OTEL_EXPORTER_OTLP_ENDPOINT: ""
       RUST_LOG: info,sqlx=warn
     ports:
       - "3000:3000"

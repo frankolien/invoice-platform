@@ -195,11 +195,29 @@ migrations/                       # sqlx-managed SQL
 tests/                            # integration tests
 ```
 
+## Load testing
+
+Four [k6](https://k6.io) scripts in [k6/](k6/), adapted from the TS app's scripts to match this API's payload shape (`snake_case`, decimal-as-string, page/page_size pagination).
+
+| Script | What it tests | VU ramp | Thresholds |
+|---|---|---|---|
+| `auth-load.js` | register → login → refresh | 0 → 100 over 2.5m | P95 login < 300ms, P95 register < 500ms, errors < 5% |
+| `invoice-load.js` | create + list + paginate + get | 0 → 200 over 3m | P95 create < 800ms, P95 list < 500ms, P95 get < 300ms |
+| `payment-stress.js` | create+send+pay with idempotency-key | 0 → 50 over 2.5m | P95 payment < 1500ms, errors < 10% |
+| `mixed-scenario.js` | 60% reads / 30% writes / 10% payments concurrently | 100 VUs for 3m | P95 read < 500ms, P95 write < 1s, P95 payment < 2s |
+
+```bash
+brew install k6                                          # macOS
+k6 run k6/auth-load.js                                   # default target
+k6 run --env BASE_URL=http://staging:3000 k6/auth-load.js
+```
+
+Note: `payment-stress.js` and the payment leg of `mixed-scenario.js` accept either `201` (Stripe configured + checkout session created) or `400` ("stripe is not configured") as success — so they're useful in dev without real Stripe keys.
+
 ## What's not (yet) ported from the Node original
 
-- OpenTelemetry tracing export (Jaeger)
+- OpenTelemetry tracing export (Jaeger) — wired but disabled, SDK 0.31 lifecycle issue under investigation
 - PDF generation
 - OpenAPI / Swagger UI
 - Bull Board queue dashboard equivalent
-- k6 load tests
 - Real email sender (Resend/SES) — only the log-only stub
