@@ -16,6 +16,9 @@ pub struct Config {
     /// OTLP HTTP endpoint for span export (Jaeger / OTel collector). When
     /// `None` (env var unset or empty), tracing stays log-only.
     pub otel_endpoint: Option<String>,
+    /// Per-org / per-IP rate limit, requests per minute. Default 200,
+    /// matches the Node app. Bump this for load testing from a single IP.
+    pub rate_limit_per_min: u64,
 }
 
 impl Config {
@@ -47,6 +50,10 @@ impl Config {
             otel_endpoint: env::var("OTEL_EXPORTER_OTLP_ENDPOINT")
                 .ok()
                 .filter(|s| !s.is_empty()),
+            rate_limit_per_min: env::var("RATE_LIMIT_PER_MIN")
+                .ok()
+                .and_then(|s| s.parse().ok())
+                .unwrap_or(200),
         })
     }
 }

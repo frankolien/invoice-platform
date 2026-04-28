@@ -39,6 +39,8 @@ fn test_config() -> Config {
         stripe_secret_key: None,
         stripe_webhook_secret: None,
         otel_endpoint: None,
+        rate_limit_per_min: 0, // disabled in tests
+
     }
 }
 

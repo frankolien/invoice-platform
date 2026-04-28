@@ -53,6 +53,9 @@ services:
       # Temporarily disabled while we debug span export — empty value =
       # log-only tracing. To re-enable, set to http://jaeger:4318
       OTEL_EXPORTER_OTLP_ENDPOINT: ""
+      # Per-org / per-IP rate limit. Default 200 if unset. Set high (or 0
+      # to disable) when running k6 load tests against a single host IP.
+      RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-200}
       RUST_LOG: info,sqlx=warn
     ports:
       - "3000:3000"

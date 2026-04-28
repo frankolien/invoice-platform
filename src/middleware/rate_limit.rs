@@ -4,7 +4,9 @@
 //!   - `rate:org:{org_id}:{bucket_minute}` if the request has `x-org-id`
 //!   - `rate:ip:{ip}:{bucket_minute}` otherwise
 //!
-//! The TS app uses 200 req/min. We match that. Health probes bypass.
+//! Default 200 req/min (matches the TS app). Configurable via
+//! `RATE_LIMIT_PER_MIN` — set high (e.g. 100000) when load testing from
+//! a single IP. Setting 0 disables the limit entirely.
 //!
 //! Why fixed window over token bucket: simpler, no floating-point math, one
 //! INCR per request. The edge case (a client can burst 2×limit at window
@@ -18,8 +20,7 @@ use actix_web::{Error, HttpResponse, web};
 use serde_json::json;
 
 use crate::cache::Cache;
-
-const LIMIT_PER_MIN: u64 = 200;
+use crate::config::Config;
 
 pub async fn rate_limit(
     req: ServiceRequest,
@@ -30,6 +31,15 @@ pub async fn rate_limit(
         return next.call(req).await.map(|r| r.map_into_left_body());
     }
 
+    // 0 = disabled, useful for load tests.
+    let limit = req
+        .app_data::<web::Data<Config>>()
+        .map(|c| c.rate_limit_per_min)
+        .unwrap_or(200);
+    if limit == 0 {
+        return next.call(req).await.map(|r| r.map_into_left_body());
+    }
+
     let Some(cache) = req.app_data::<web::Data<Cache>>().cloned() else {
         // Cache missing — fail open rather than rejecting every request.
         return next.call(req).await.map(|r| r.map_into_left_body());
@@ -37,7 +47,7 @@ pub async fn rate_limit(
 
     let key = bucket_key(&req);
     match cache.incr_with_ttl(&key, 60).await {
-        Ok(count) if count > LIMIT_PER_MIN => {
+        Ok(count) if count > limit => {
             let retry_after = cache.ttl(&key).await.ok().unwrap_or(60).max(1);
             tracing::warn!(key = %key, count, "rate limited");
             let resp = HttpResponse::TooManyRequests()

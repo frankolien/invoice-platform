@@ -81,7 +81,7 @@ async fn register(
         return Err(AppError::Conflict("email already registered".into()));
     }
 
-    let hash = password::hash(&input.password)?;
+    let hash = password::hash(&input.password).await?;
 
     let row: UserRow = sqlx::query_as(
         r#"
@@ -128,7 +128,7 @@ async fn login(
 
     let row = row.ok_or(AppError::Unauthorized)?;
 
-    if !password::verify(&input.password, &row.password_hash)? {
+    if !password::verify(&input.password, &row.password_hash).await? {
         return Err(AppError::Unauthorized);
     }
 
