@@ -56,9 +56,14 @@ services:
       # Per-org / per-IP rate limit. Default 200 if unset. Set high (or 0
       # to disable) when running k6 load tests against a single host IP.
       RATE_LIMIT_PER_MIN: ${RATE_LIMIT_PER_MIN:-200}
-      RUST_LOG: info,sqlx=warn
+      # Quiet tracing-actix-web's per-request span at INFO — under load it
+      # was emitting two ~1KB JSON span dumps per request which caused the
+      # container to OOM at ~70 req/s. Audit logs (our explicit info!) and
+      # 5xx still come through.
+      RUST_LOG: ${RUST_LOG:-info,sqlx=warn,tracing_actix_web=warn}
     ports:
       - "3000:3000"
+    restart: unless-stopped
 
 volumes:
   pgdata:
