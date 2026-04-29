@@ -64,6 +64,7 @@ async fn main() -> anyhow::Result<()> {
     state.breakers = actix_web::web::Data::new(breakers);
 
     let server = HttpServer::new(move || build_app(state.clone()).wrap(TracingLogger::default()))
+        .workers(20)
         .bind(("0.0.0.0", port))?
         .shutdown_timeout(15)
         .run();
