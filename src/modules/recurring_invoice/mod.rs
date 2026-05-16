@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -12,7 +13,8 @@ use crate::error::{AppError, AppResult};
 use crate::middleware::tenant::TenantContext;
 use crate::modules::invoice::LineItem;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[schema(as = CreateRecurringInvoiceInput)]
 pub struct CreateInput {
     pub client_id: Uuid,
     #[validate(length(min = 1))]
@@ -25,7 +27,8 @@ pub struct CreateInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[schema(as = UpdateRecurringInvoiceInput)]
 pub struct UpdateInput {
     pub line_items: Option<Vec<LineItem>>,
     pub frequency: Option<String>,
@@ -35,18 +38,20 @@ pub struct UpdateInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub status: Option<String>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct RecurringInvoice {
     pub id: Uuid,
     pub org_id: Uuid,
     pub client_id: Uuid,
+    #[schema(value_type = Object)]
     pub line_items: JsonValue,
     pub frequency: String,
     pub tax_rate: Decimal,
@@ -132,8 +137,19 @@ fn last_day_of_month(year: i32, month: u32) -> u32 {
         .unwrap_or(28)
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/recurring-invoices",
+    tag = "recurring-invoices",
+    request_body = CreateInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Recurring invoice created", body = RecurringInvoice),
+        (status = 400, description = "Validation error or invalid frequency"),
+    )
+)]
 #[post("")]
-async fn create(
+pub async fn create(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     input: web::Json<CreateInput>,
@@ -187,8 +203,18 @@ async fn create(
     Ok(HttpResponse::Created().json(recurring))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/recurring-invoices",
+    tag = "recurring-invoices",
+    params(ListQuery),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Recurring invoices", body = [RecurringInvoice]),
+    )
+)]
 #[get("")]
-async fn list(
+pub async fn list(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     query: web::Query<ListQuery>,
@@ -219,8 +245,19 @@ async fn list(
     Ok(HttpResponse::Ok().json(items))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/recurring-invoices/{id}",
+    tag = "recurring-invoices",
+    params(("id" = Uuid, Path, description = "Recurring invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Recurring invoice", body = RecurringInvoice),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[get("/{id}")]
-async fn get_one(
+pub async fn get_one(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -241,8 +278,21 @@ async fn get_one(
     r.map(|r| HttpResponse::Ok().json(r)).ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/recurring-invoices/{id}",
+    tag = "recurring-invoices",
+    params(("id" = Uuid, Path, description = "Recurring invoice id")),
+    request_body = UpdateInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Updated", body = RecurringInvoice),
+        (status = 400, description = "Cancelled or invalid frequency"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[patch("/{id}")]
-async fn update(
+pub async fn update(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -323,8 +373,19 @@ async fn update(
     Ok(HttpResponse::Ok().json(updated))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/recurring-invoices/{id}/pause",
+    tag = "recurring-invoices",
+    params(("id" = Uuid, Path, description = "Recurring invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Paused", body = RecurringInvoice),
+        (status = 400, description = "Only active recurring invoices can be paused"),
+    )
+)]
 #[post("/{id}/pause")]
-async fn pause(
+pub async fn pause(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -349,8 +410,20 @@ async fn pause(
         .ok_or_else(|| AppError::BadRequest("only active recurring invoices can be paused".into()))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/recurring-invoices/{id}/resume",
+    tag = "recurring-invoices",
+    params(("id" = Uuid, Path, description = "Recurring invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Resumed", body = RecurringInvoice),
+        (status = 400, description = "Only paused recurring invoices can be resumed"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[post("/{id}/resume")]
-async fn resume(
+pub async fn resume(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -400,8 +473,19 @@ async fn resume(
     Ok(HttpResponse::Ok().json(updated))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/recurring-invoices/{id}/cancel",
+    tag = "recurring-invoices",
+    params(("id" = Uuid, Path, description = "Recurring invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Cancelled", body = RecurringInvoice),
+        (status = 400, description = "Not found or already cancelled"),
+    )
+)]
 #[post("/{id}/cancel")]
-async fn cancel(
+pub async fn cancel(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,

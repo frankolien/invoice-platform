@@ -4,6 +4,7 @@ use rand::RngCore;
 use serde::{Deserialize, Serialize};
 use serde_json::json;
 use sqlx::FromRow;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -21,7 +22,8 @@ pub const ALL_EVENTS: &[&str] = &[
     "payment.failed",
 ];
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[schema(as = CreateWebhookSubscriptionInput)]
 pub struct CreateInput {
     #[validate(url)]
     pub url: String,
@@ -29,7 +31,8 @@ pub struct CreateInput {
     pub events: Vec<String>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
+#[schema(as = UpdateWebhookSubscriptionInput)]
 pub struct UpdateInput {
     #[validate(url)]
     pub url: Option<String>,
@@ -37,13 +40,14 @@ pub struct UpdateInput {
     pub status: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct Subscription {
     pub id: Uuid,
     pub org_id: Uuid,
@@ -99,8 +103,19 @@ fn generate_secret() -> String {
     format!("whsec_{}", hex::encode(bytes))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/webhook-subscriptions",
+    tag = "webhook-subscriptions",
+    request_body = CreateInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Subscription created — secret returned only here", body = Subscription),
+        (status = 400, description = "Validation error or unknown event"),
+    )
+)]
 #[post("")]
-async fn create(
+pub async fn create(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     input: web::Json<CreateInput>,
@@ -128,8 +143,18 @@ async fn create(
     Ok(HttpResponse::Created().json(sub.with_secret()))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/webhook-subscriptions",
+    tag = "webhook-subscriptions",
+    params(ListQuery),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Subscriptions", body = [Subscription]),
+    )
+)]
 #[get("")]
-async fn list(
+pub async fn list(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     query: web::Query<ListQuery>,
@@ -156,8 +181,19 @@ async fn list(
     Ok(HttpResponse::Ok().json(items))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/webhook-subscriptions/{id}",
+    tag = "webhook-subscriptions",
+    params(("id" = Uuid, Path, description = "Subscription id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Subscription", body = Subscription),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[get("/{id}")]
-async fn get_one(
+pub async fn get_one(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -178,8 +214,21 @@ async fn get_one(
         .ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/webhook-subscriptions/{id}",
+    tag = "webhook-subscriptions",
+    params(("id" = Uuid, Path, description = "Subscription id")),
+    request_body = UpdateInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Updated", body = Subscription),
+        (status = 400, description = "Validation error"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[patch("/{id}")]
-async fn update(
+pub async fn update(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -219,8 +268,19 @@ async fn update(
         .ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/webhook-subscriptions/{id}",
+    tag = "webhook-subscriptions",
+    params(("id" = Uuid, Path, description = "Subscription id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Deleted"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[delete("/{id}")]
-async fn delete_one(
+pub async fn delete_one(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -237,8 +297,19 @@ async fn delete_one(
     Ok(HttpResponse::NoContent().finish())
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/webhook-subscriptions/{id}/test",
+    tag = "webhook-subscriptions",
+    params(("id" = Uuid, Path, description = "Subscription id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Test delivery dispatched; body reports outcome"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[post("/{id}/test")]
-async fn test_delivery(
+pub async fn test_delivery(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,

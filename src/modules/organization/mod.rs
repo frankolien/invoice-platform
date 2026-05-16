@@ -3,6 +3,7 @@ use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -10,7 +11,7 @@ use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::middleware::auth_user::AuthUser;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateOrgInput {
     #[validate(length(min = 1, max = 120))]
     pub name: String,
@@ -18,28 +19,30 @@ pub struct CreateOrgInput {
     pub slug: String,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct UpdateOrgInput {
     #[validate(length(min = 1, max = 120))]
     pub name: Option<String>,
     pub plan: Option<String>,
+    #[schema(value_type = Object)]
     pub settings: Option<JsonValue>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct InviteInput {
     #[validate(email)]
     pub email: String,
     pub role: String,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct Organization {
     pub id: Uuid,
     pub name: String,
     pub slug: String,
     pub owner_id: Uuid,
     pub plan: String,
+    #[schema(value_type = Object)]
     pub settings: JsonValue,
     pub created_at: DateTime<Utc>,
     pub updated_at: DateTime<Utc>,
@@ -55,8 +58,21 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/organizations",
+    tag = "organizations",
+    request_body = CreateOrgInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Organization created", body = Organization),
+        (status = 400, description = "Validation error"),
+        (status = 409, description = "Slug already taken"),
+        (status = 401, description = "Unauthorized"),
+    )
+)]
 #[post("")]
-async fn create(
+pub async fn create(
     pool: web::Data<DbPool>,
     user: AuthUser,
     input: web::Json<CreateOrgInput>,
@@ -97,8 +113,20 @@ async fn create(
     Ok(HttpResponse::Created().json(org))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/organizations/{id}",
+    tag = "organizations",
+    params(("id" = Uuid, Path, description = "Organization id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Organization", body = Organization),
+        (status = 403, description = "Not a member"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[get("/{id}")]
-async fn get_one(
+pub async fn get_one(
     pool: web::Data<DbPool>,
     user: AuthUser,
     path: web::Path<Uuid>,
@@ -126,8 +154,21 @@ async fn get_one(
         .ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/organizations/{id}",
+    tag = "organizations",
+    params(("id" = Uuid, Path, description = "Organization id")),
+    request_body = UpdateOrgInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Organization updated", body = Organization),
+        (status = 403, description = "Insufficient role (owner/admin only)"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[patch("/{id}")]
-async fn update(
+pub async fn update(
     pool: web::Data<DbPool>,
     user: AuthUser,
     path: web::Path<Uuid>,
@@ -168,8 +209,22 @@ async fn update(
     Ok(HttpResponse::Ok().json(org))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/organizations/{id}/invite",
+    tag = "organizations",
+    params(("id" = Uuid, Path, description = "Organization id")),
+    request_body = InviteInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Member invited / role updated"),
+        (status = 400, description = "Invalid role"),
+        (status = 403, description = "Insufficient role"),
+        (status = 404, description = "Invitee not found"),
+    )
+)]
 #[post("/{id}/invite")]
-async fn invite(
+pub async fn invite(
     pool: web::Data<DbPool>,
     user: AuthUser,
     path: web::Path<Uuid>,

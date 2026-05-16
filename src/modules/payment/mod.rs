@@ -15,6 +15,7 @@ use stripe::{
     CreateCheckoutSessionLineItems, CreateCheckoutSessionLineItemsPriceData,
     CreateCheckoutSessionLineItemsPriceDataProductData, Currency, Refund,
 };
+use utoipa::ToSchema;
 use uuid::Uuid;
 
 use crate::cache::Cache;
@@ -25,7 +26,7 @@ use crate::error::{AppError, AppResult};
 use crate::middleware::tenant::TenantContext;
 use crate::modules::payment::stripe_client::{StripeClient, require_stripe};
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct Payment {
     pub id: Uuid,
     pub org_id: Uuid,
@@ -42,10 +43,24 @@ pub struct Payment {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefundInput {
     /// If None, refund the full amount.
     pub amount: Option<Decimal>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct CheckoutSessionResponse {
+    pub payment_id: Uuid,
+    pub checkout_session_id: String,
+    pub checkout_url: Option<String>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct RefundResponse {
+    pub payment_id: Uuid,
+    pub stripe_refund_id: String,
+    pub status: String,
 }
 
 pub fn configure(cfg: &mut web::ServiceConfig) {
@@ -64,9 +79,25 @@ pub fn configure_invoice_scoped(cfg: &mut web::ServiceConfig) {
         .service(list_payments_for_invoice);
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invoices/{invoice_id}/pay",
+    tag = "payments",
+    params(
+        ("invoice_id" = Uuid, Path, description = "Invoice id"),
+        ("Idempotency-Key" = Option<String>, Header, description = "Idempotency key for safe retries"),
+    ),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Stripe Checkout session created", body = CheckoutSessionResponse),
+        (status = 400, description = "Invoice cannot be paid in its current status"),
+        (status = 404, description = "Invoice not found"),
+        (status = 503, description = "Stripe not configured"),
+    )
+)]
 #[post("/{invoice_id}/pay")]
 #[allow(clippy::too_many_arguments)]
-async fn create_checkout(
+pub async fn create_checkout(
     req: HttpRequest,
     pool: web::Data<DbPool>,
     cache: web::Data<Cache>,
@@ -209,8 +240,19 @@ async fn create_checkout(
     Ok(HttpResponse::Created().json(response))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invoices/{invoice_id}/payments",
+    tag = "payments",
+    params(("invoice_id" = Uuid, Path, description = "Invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Payments for invoice", body = [Payment]),
+        (status = 404, description = "Invoice not found"),
+    )
+)]
 #[get("/{invoice_id}/payments")]
-async fn list_payments_for_invoice(
+pub async fn list_payments_for_invoice(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -244,8 +286,22 @@ async fn list_payments_for_invoice(
     Ok(HttpResponse::Ok().json(payments))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/payments/{id}/refund",
+    tag = "payments",
+    params(("id" = Uuid, Path, description = "Payment id")),
+    request_body = RefundInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Refund issued", body = RefundResponse),
+        (status = 400, description = "Payment not refundable"),
+        (status = 404, description = "Payment not found"),
+        (status = 503, description = "Stripe not configured"),
+    )
+)]
 #[post("/{id}/refund")]
-async fn refund(
+pub async fn refund(
     pool: web::Data<DbPool>,
     breakers: web::Data<CircuitBreakers>,
     stripe: Option<web::Data<StripeClient>>,

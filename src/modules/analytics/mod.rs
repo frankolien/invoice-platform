@@ -10,25 +10,28 @@ use chrono::{DateTime, Utc};
 use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use utoipa::{IntoParams, ToSchema};
 
 use crate::db::DbPool;
 use crate::error::AppResult;
 use crate::middleware::tenant::TenantContext;
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct DateRangeQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct RevenueQuery {
     pub from: Option<DateTime<Utc>>,
     pub to: Option<DateTime<Utc>>,
     pub currency: Option<String>,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct RevenueReport {
     pub currency: String,
     pub total_revenue: Decimal,
@@ -37,7 +40,7 @@ pub struct RevenueReport {
     pub monthly: Vec<MonthlyRevenue>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct MonthlyRevenue {
     pub year: i32,
     pub month: i32,
@@ -46,20 +49,20 @@ pub struct MonthlyRevenue {
     pub avg_payment: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct InvoiceReport {
     pub by_status: Vec<StatusGroup>,
     pub overdue: OverdueSummary,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct StatusGroup {
     pub status: String,
     pub count: i64,
     pub total_amount: Decimal,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct OverdueSummary {
     pub count: i64,
     pub total_amount: Decimal,
@@ -73,8 +76,18 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/analytics/revenue",
+    tag = "analytics",
+    params(RevenueQuery),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Revenue report", body = RevenueReport),
+    )
+)]
 #[get("/revenue")]
-async fn revenue_report(
+pub async fn revenue_report(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     query: web::Query<RevenueQuery>,
@@ -141,8 +154,18 @@ async fn revenue_report(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/analytics/invoices",
+    tag = "analytics",
+    params(DateRangeQuery),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Invoice report", body = InvoiceReport),
+    )
+)]
 #[get("/invoices")]
-async fn invoice_report(
+pub async fn invoice_report(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     query: web::Query<DateRangeQuery>,

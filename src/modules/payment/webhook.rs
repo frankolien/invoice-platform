@@ -15,8 +15,24 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     cfg.service(web::scope("/webhooks").service(stripe_webhook));
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/webhooks/stripe",
+    tag = "webhooks",
+    params(("Stripe-Signature" = String, Header, description = "Stripe webhook signature")),
+    request_body(
+        content = String,
+        description = "Raw Stripe event payload (verified via signature)",
+        content_type = "application/json"
+    ),
+    responses(
+        (status = 200, description = "Event accepted (or deduplicated)"),
+        (status = 400, description = "Missing signature or invalid body"),
+        (status = 401, description = "Signature verification failed"),
+    )
+)]
 #[post("/stripe")]
-async fn stripe_webhook(
+pub async fn stripe_webhook(
     req: HttpRequest,
     body: web::Bytes,
     pool: web::Data<DbPool>,

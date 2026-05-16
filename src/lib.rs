@@ -8,10 +8,13 @@ pub mod jobs;
 pub mod middleware;
 pub mod modules;
 pub mod observability;
+pub mod openapi;
 
 use actix_web::body::MessageBody;
 use actix_web::dev::{ServiceFactory, ServiceRequest, ServiceResponse};
 use actix_web::{App, web};
+use utoipa::OpenApi;
+use utoipa_swagger_ui::SwaggerUi;
 
 use crate::auth::jwt::TokenService;
 use crate::cache::Cache;
@@ -87,6 +90,10 @@ pub fn build_app(
     ))
         .configure(observability::health::configure)
         .configure(observability::metrics::configure)
+        .service(
+            SwaggerUi::new("/docs/{_:.*}")
+                .url("/docs/openapi.json", openapi::ApiDoc::openapi()),
+        )
         .service(
             // Only /v1 is rate-limited + audited. Health, metrics, and root
             // stay unwrapped so probes never get 429'd and never log audit

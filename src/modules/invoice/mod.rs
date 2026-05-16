@@ -4,6 +4,7 @@ use rust_decimal::Decimal;
 use serde::{Deserialize, Serialize};
 use serde_json::Value as JsonValue;
 use sqlx::FromRow;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -11,14 +12,14 @@ use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::middleware::tenant::TenantContext;
 
-#[derive(Debug, Deserialize, Serialize, Clone)]
+#[derive(Debug, Deserialize, Serialize, Clone, ToSchema)]
 pub struct LineItem {
     pub description: String,
     pub quantity: Decimal,
     pub unit_price: Decimal,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateInvoiceInput {
     pub client_id: Uuid,
     #[validate(length(min = 1, max = 64))]
@@ -31,7 +32,7 @@ pub struct CreateInvoiceInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct UpdateInvoiceInput {
     pub line_items: Option<Vec<LineItem>>,
     pub tax_rate: Option<Decimal>,
@@ -40,20 +41,22 @@ pub struct UpdateInvoiceInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub status: Option<String>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct Invoice {
     pub id: Uuid,
     pub org_id: Uuid,
     pub client_id: Uuid,
     pub invoice_number: String,
     pub status: String,
+    #[schema(value_type = Object)]
     pub line_items: JsonValue,
     pub subtotal: Decimal,
     pub tax_rate: Decimal,
@@ -93,8 +96,20 @@ fn compute_totals(items: &[LineItem], tax_rate: Decimal) -> (Decimal, Decimal, D
     (subtotal, tax_amount, total)
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invoices",
+    tag = "invoices",
+    request_body = CreateInvoiceInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Invoice created", body = Invoice),
+        (status = 400, description = "Validation error or client missing"),
+        (status = 409, description = "Duplicate invoice_number"),
+    )
+)]
 #[post("")]
-async fn create(
+pub async fn create(
     pool: web::Data<DbPool>,
     queues: web::Data<crate::jobs::JobQueues>,
     metrics: web::Data<crate::observability::metrics::Metrics>,
@@ -224,8 +239,18 @@ pub(crate) async fn create_invoice(
     Ok(invoice)
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invoices",
+    tag = "invoices",
+    params(ListQuery),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Invoices", body = [Invoice]),
+    )
+)]
 #[get("")]
-async fn list(
+pub async fn list(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     query: web::Query<ListQuery>,
@@ -256,8 +281,19 @@ async fn list(
     Ok(HttpResponse::Ok().json(items))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/invoices/{id}",
+    tag = "invoices",
+    params(("id" = Uuid, Path, description = "Invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Invoice", body = Invoice),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[get("/{id}")]
-async fn get_one(
+pub async fn get_one(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -280,8 +316,21 @@ async fn get_one(
         .ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/invoices/{id}",
+    tag = "invoices",
+    params(("id" = Uuid, Path, description = "Invoice id")),
+    request_body = UpdateInvoiceInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Invoice updated", body = Invoice),
+        (status = 400, description = "Only draft invoices can be edited"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[patch("/{id}")]
-async fn update(
+pub async fn update(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -357,8 +406,19 @@ async fn update(
     Ok(HttpResponse::Ok().json(updated))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invoices/{id}/send",
+    tag = "invoices",
+    params(("id" = Uuid, Path, description = "Invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Invoice sent", body = Invoice),
+        (status = 400, description = "Invoice not in draft status"),
+    )
+)]
 #[post("/{id}/send")]
-async fn send(
+pub async fn send(
     pool: web::Data<DbPool>,
     queues: web::Data<crate::jobs::JobQueues>,
     tenant: TenantContext,
@@ -402,8 +462,19 @@ async fn send(
     Ok(HttpResponse::Ok().json(invoice))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invoices/{id}/cancel",
+    tag = "invoices",
+    params(("id" = Uuid, Path, description = "Invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Invoice cancelled", body = Invoice),
+        (status = 400, description = "Invoice not cancellable"),
+    )
+)]
 #[post("/{id}/cancel")]
-async fn cancel(
+pub async fn cancel(
     pool: web::Data<DbPool>,
     queues: web::Data<crate::jobs::JobQueues>,
     tenant: TenantContext,
@@ -439,8 +510,19 @@ async fn cancel(
     Ok(HttpResponse::Ok().json(invoice))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/invoices/{id}/viewed",
+    tag = "invoices",
+    params(("id" = Uuid, Path, description = "Invoice id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Marked viewed", body = Invoice),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[post("/{id}/viewed")]
-async fn mark_viewed(
+pub async fn mark_viewed(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,

@@ -58,6 +58,9 @@ reqwest = { version = "0.12", default-features = false, features = ["json", "rus
 rand = "0.8"
 parking_lot = "0.12"
 
+utoipa = { version = "5", features = ["chrono", "decimal", "uuid"] }
+utoipa-swagger-ui = { version = "8", features = ["actix-web"] }
+
 [dev-dependencies]
 actix-web = { version = "4", features = ["macros"] }
 actix-http = "3"

@@ -2,6 +2,7 @@ use actix_web::{HttpResponse, Responder, delete, get, patch, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use utoipa::{IntoParams, ToSchema};
 use uuid::Uuid;
 use validator::Validate;
 
@@ -9,7 +10,7 @@ use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 use crate::middleware::tenant::TenantContext;
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct CreateClientInput {
     #[validate(length(min = 1, max = 200))]
     pub name: String,
@@ -21,7 +22,7 @@ pub struct CreateClientInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct UpdateClientInput {
     #[validate(length(min = 1, max = 200))]
     pub name: Option<String>,
@@ -33,14 +34,15 @@ pub struct UpdateClientInput {
     pub notes: Option<String>,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, IntoParams)]
+#[into_params(parameter_in = Query)]
 pub struct ListQuery {
     pub page: Option<i64>,
     pub page_size: Option<i64>,
     pub search: Option<String>,
 }
 
-#[derive(Debug, Serialize, FromRow)]
+#[derive(Debug, Serialize, FromRow, ToSchema)]
 pub struct Client {
     pub id: Uuid,
     pub org_id: Uuid,
@@ -54,9 +56,9 @@ pub struct Client {
     pub updated_at: DateTime<Utc>,
 }
 
-#[derive(Debug, Serialize)]
-pub struct Page<T> {
-    pub items: Vec<T>,
+#[derive(Debug, Serialize, ToSchema)]
+pub struct ClientPage {
+    pub items: Vec<Client>,
     pub page: i64,
     pub page_size: i64,
     pub total: i64,
@@ -73,8 +75,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/clients",
+    tag = "clients",
+    request_body = CreateClientInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 201, description = "Client created", body = Client),
+        (status = 400, description = "Validation error"),
+    )
+)]
 #[post("")]
-async fn create(
+pub async fn create(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     input: web::Json<CreateClientInput>,
@@ -101,8 +114,18 @@ async fn create(
     Ok(HttpResponse::Created().json(client))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/clients",
+    tag = "clients",
+    params(ListQuery),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Paginated clients", body = ClientPage),
+    )
+)]
 #[get("")]
-async fn list(
+pub async fn list(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     query: web::Query<ListQuery>,
@@ -145,7 +168,7 @@ async fn list(
     .fetch_one(pool.get_ref())
     .await?;
 
-    Ok(HttpResponse::Ok().json(Page {
+    Ok(HttpResponse::Ok().json(ClientPage {
         items,
         page,
         page_size,
@@ -153,8 +176,19 @@ async fn list(
     }))
 }
 
+#[utoipa::path(
+    get,
+    path = "/v1/clients/{id}",
+    tag = "clients",
+    params(("id" = Uuid, Path, description = "Client id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Client", body = Client),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[get("/{id}")]
-async fn get_one(
+pub async fn get_one(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -177,8 +211,20 @@ async fn get_one(
         .ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    patch,
+    path = "/v1/clients/{id}",
+    tag = "clients",
+    params(("id" = Uuid, Path, description = "Client id")),
+    request_body = UpdateClientInput,
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 200, description = "Client updated", body = Client),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[patch("/{id}")]
-async fn update(
+pub async fn update(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,
@@ -217,8 +263,19 @@ async fn update(
         .ok_or(AppError::NotFound)
 }
 
+#[utoipa::path(
+    delete,
+    path = "/v1/clients/{id}",
+    tag = "clients",
+    params(("id" = Uuid, Path, description = "Client id")),
+    security(("bearer_auth" = [])),
+    responses(
+        (status = 204, description = "Client soft-deleted"),
+        (status = 404, description = "Not found"),
+    )
+)]
 #[delete("/{id}")]
-async fn soft_delete(
+pub async fn soft_delete(
     pool: web::Data<DbPool>,
     tenant: TenantContext,
     path: web::Path<Uuid>,

@@ -2,6 +2,7 @@ use actix_web::{HttpResponse, Responder, post, web};
 use chrono::{DateTime, Utc};
 use serde::{Deserialize, Serialize};
 use sqlx::FromRow;
+use utoipa::ToSchema;
 use uuid::Uuid;
 use validator::Validate;
 
@@ -9,7 +10,7 @@ use crate::auth::{jwt::TokenService, password};
 use crate::db::DbPool;
 use crate::error::{AppError, AppResult};
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct RegisterInput {
     #[validate(email)]
     pub email: String,
@@ -19,7 +20,7 @@ pub struct RegisterInput {
     pub name: String,
 }
 
-#[derive(Debug, Deserialize, Validate)]
+#[derive(Debug, Deserialize, Validate, ToSchema)]
 pub struct LoginInput {
     #[validate(email)]
     pub email: String,
@@ -27,24 +28,30 @@ pub struct LoginInput {
     pub password: String,
 }
 
-#[derive(Debug, Deserialize)]
+#[derive(Debug, Deserialize, ToSchema)]
 pub struct RefreshInput {
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct AuthResponse {
     pub user: UserDto,
     pub access_token: String,
     pub refresh_token: String,
 }
 
-#[derive(Debug, Serialize)]
+#[derive(Debug, Serialize, ToSchema)]
 pub struct UserDto {
     pub id: Uuid,
     pub email: String,
     pub name: String,
     pub created_at: DateTime<Utc>,
+}
+
+#[derive(Debug, Serialize, ToSchema)]
+pub struct TokenPair {
+    pub access_token: String,
+    pub refresh_token: String,
 }
 
 #[derive(FromRow)]
@@ -65,8 +72,19 @@ pub fn configure(cfg: &mut web::ServiceConfig) {
     );
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/register",
+    tag = "auth",
+    request_body = RegisterInput,
+    responses(
+        (status = 201, description = "User registered", body = AuthResponse),
+        (status = 400, description = "Validation error"),
+        (status = 409, description = "Email already registered"),
+    )
+)]
 #[post("/register")]
-async fn register(
+pub async fn register(
     pool: web::Data<DbPool>,
     tokens: web::Data<TokenService>,
     input: web::Json<RegisterInput>,
@@ -111,8 +129,19 @@ async fn register(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/login",
+    tag = "auth",
+    request_body = LoginInput,
+    responses(
+        (status = 200, description = "Logged in", body = AuthResponse),
+        (status = 400, description = "Validation error"),
+        (status = 401, description = "Invalid credentials"),
+    )
+)]
 #[post("/login")]
-async fn login(
+pub async fn login(
     pool: web::Data<DbPool>,
     tokens: web::Data<TokenService>,
     input: web::Json<LoginInput>,
@@ -147,8 +176,18 @@ async fn login(
     }))
 }
 
+#[utoipa::path(
+    post,
+    path = "/v1/auth/refresh",
+    tag = "auth",
+    request_body = RefreshInput,
+    responses(
+        (status = 200, description = "Tokens refreshed", body = TokenPair),
+        (status = 401, description = "Invalid refresh token"),
+    )
+)]
 #[post("/refresh")]
-async fn refresh_tokens(
+pub async fn refresh_tokens(
     tokens: web::Data<TokenService>,
     input: web::Json<RefreshInput>,
 ) -> AppResult<impl Responder> {
